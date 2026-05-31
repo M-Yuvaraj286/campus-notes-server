@@ -13,11 +13,13 @@ const PORT = process.env.PORT || 4000;
 app.use(cors({
      origin: [
        'http://localhost:3000',
-       'https://campus-notes-client.vercel.app'  // use your actual Vercel URL
+       'https://campus-notes-client.vercel.app'  // no trailing slash
      ]
    }));
 app.use(express.json());
-
+app.get('/', (req, res) => {
+  res.json({ status: 'API is running', time: new Date() });
+});
 
 // Cloudinary Config
 cloudinary.config({
