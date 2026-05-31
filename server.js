@@ -10,8 +10,14 @@ const app = express();
 const PORT = process.env.PORT || 4000;
 
 // Middleware
-app.use(cors());
+app.use(cors({
+     origin: [
+       'http://localhost:3000',
+       'https://campus-notes-client.vercel.app'  // use your actual Vercel URL
+     ]
+   }));
 app.use(express.json());
+
 
 // Cloudinary Config
 cloudinary.config({
