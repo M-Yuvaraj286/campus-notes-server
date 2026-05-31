@@ -11,11 +11,21 @@ const PORT = process.env.PORT || 4000;
 
 // Middleware
 app.use(cors({
-     origin: [
-       'http://localhost:3000',
-       'https://campus-notes-client.vercel.app'  // no trailing slash
-     ]
-   }));
+  origin: function (origin, callback) {
+    // Allow requests with no origin like mobile apps or curl
+    if (!origin) return callback(null, true);
+    
+    if (
+      origin === 'http://localhost:3000' ||
+      origin.endsWith('.vercel.app') // allows all your vercel deployments
+    ) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true
+}));
 app.use(express.json());
 app.get('/', (req, res) => {
   res.json({ status: 'API is running', time: new Date() });
