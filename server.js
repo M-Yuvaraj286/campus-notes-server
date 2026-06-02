@@ -28,7 +28,10 @@ app.use(cors({
 }));
 app.use(express.json());
 app.get('/', (req, res) => {
-  res.json({ status: 'API is running', time: new Date() });
+  res.json({ 
+    status: 'Campus Notes API is running',
+    docs: 'Use /api/notes or /api/subjects' 
+  });
 });
 
 // Cloudinary Config
@@ -88,7 +91,7 @@ app.get('/api/notes', async (req, res) => {
   try {
     const { subject_id, search } = req.query;
     let query = `
-      SELECT n.id, n.title, n.description, n.file_url, n.created_at, n.file_size,
+      SELECT n.id, n.title, n.description, n.file_url, n.created_at, n.file_size, n.upvotes,
              s.name as subject_name, s.semester, u.name as uploader_name
       FROM notes n
       JOIN subjects s ON n.subject_id = s.id
@@ -172,7 +175,7 @@ app.post('/api/notes', upload.single('file'), async (req, res) => {
 app.get('/api/admin/notes', async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT n.*, s.name as subject_name, s.semester, u.name as uploader_name, u.email as uploader_email
+      SELECT n.*, s.name as subject_name, s.semester, n.upvotes, u.name as uploader_name, u.email as uploader_email
       FROM notes n
       JOIN subjects s ON n.subject_id = s.id
       JOIN users u ON n.user_id = u.id
@@ -261,6 +264,22 @@ app.get('/api/download/:id', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).send('Download failed');
+  }
+});
+
+// 11. UPVOTE NOTE
+app.put('/api/notes/:id/upvote', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query(
+      'UPDATE notes SET upvotes = COALESCE(upvotes, 0) + 1 WHERE id = $1', 
+      [id]
+    );
+    const result = await pool.query('SELECT upvotes FROM notes WHERE id = $1', [id]);
+    res.json({ success: true, upvotes: result.rows[0].upvotes });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Upvote failed' });
   }
 });
 
