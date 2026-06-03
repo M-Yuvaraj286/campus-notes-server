@@ -12,12 +12,11 @@ const PORT = process.env.PORT || 4000;
 // Middleware
 app.use(cors({
   origin: function (origin, callback) {
-    const allowedOrigins = [
-      'http://localhost:3000',
-      'https://campus-notes-wine.vercel.app',
-      'https://campus-notes-git-main-nobitas-projects-d82bbf15.vercel.app'
-    ];
-    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
+    // Allow requests with no origin - Postman, mobile apps, curl
+    if (!origin) return callback(null, true);
+    
+    // Allow localhost and any *.vercel.app domain
+    if (origin === 'http://localhost:3000' || origin.endsWith('.vercel.app')) {
       callback(null, true);
     } else {
       callback(new Error('Not allowed by CORS'));
