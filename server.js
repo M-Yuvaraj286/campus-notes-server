@@ -132,17 +132,24 @@ app.post('/api/notes', upload.single('file'), async (req, res) => {
       return res.status(400).json({ error: 'No PDF file uploaded' });
     }
 
-    const b64 = Buffer.from(req.file.buffer).toString('base64');
-    const dataURI = 'data:' + req.file.mimetype + ';base64,' + b64;
     const cleanTitle = title.replace(/[^a-z0-9]/gi, '_').replace(/_{2,}/g, '_').substring(0, 40);
 
-    const cloudinaryRes = await cloudinary.uploader.upload(dataURI, {
-      folder: 'campus-notes',
-      resource_type: 'raw',
-      type: 'upload',
-      access_mode: 'public',
-      public_id: cleanTitle,
-      overwrite: true
+    // Use upload_stream instead of dataURI to avoid 10MB limit
+    const cloudinaryRes = await new Promise((resolve, reject) => {
+      const uploadStream = cloudinary.uploader.upload_stream(
+        {
+          folder: 'campus-notes',
+          resource_type: 'raw', // Critical for PDFs
+          public_id: `${Date.now()}_${cleanTitle}`,
+          type: 'upload',
+          access_mode: 'public'
+        },
+        (error, result) => {
+          if (error) reject(error);
+          else resolve(result);
+        }
+      );
+      uploadStream.end(req.file.buffer);
     });
 
     let userResult = await pool.query('SELECT id FROM users WHERE email = $1', [uploader_email]);
@@ -166,7 +173,7 @@ app.post('/api/notes', upload.single('file'), async (req, res) => {
     res.json({ success: true, message: 'Uploaded! Waiting for admin approval' });
 
   } catch (err) {
-    console.error(err);
+    console.error('Upload error:', err);
     res.status(500).json({ error: 'Upload failed: ' + err.message });
   }
 });
