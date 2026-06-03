@@ -12,13 +12,12 @@ const PORT = process.env.PORT || 4000;
 // Middleware
 app.use(cors({
   origin: function (origin, callback) {
-    // Allow requests with no origin like mobile apps or curl
-    if (!origin) return callback(null, true);
-    
-    if (
-      origin === 'http://localhost:3000' ||
-      origin.endsWith('.vercel.app') // allows all your vercel deployments
-    ) {
+    const allowedOrigins = [
+      'http://localhost:3000',
+      'https://campus-notes-wine.vercel.app',
+      'https://campus-notes-git-main-nobitas-projects-d82bbf15.vercel.app'
+    ];
+    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
       callback(null, true);
     } else {
       callback(new Error('Not allowed by CORS'));
@@ -26,6 +25,7 @@ app.use(cors({
   },
   credentials: true
 }));
+
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.get('/', (req, res) => {
@@ -64,7 +64,7 @@ pool.connect((err, client, release) => {
 const storage = multer.memoryStorage();
 const upload = multer({
   storage: storage,
-  limits: { fileSize: 20 * 1024 * 1024 }, // 20MB limit
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB limit
   fileFilter: (req, file, cb) => {
     if (file.mimetype === 'application/pdf') {
       cb(null, true);
