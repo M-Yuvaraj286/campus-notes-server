@@ -1,90 +1,45 @@
-require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const { Pool } = require('pg');
-const cloudinary = require('cloudinary').v2;
 const multer = require('multer');
-const https = require('https');
+const cloudinary = require('cloudinary').v2;
+const { Pool } = require('pg');
+require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 4000;
 
 // Middleware
-app.use(cors({
-  origin: function (origin, callback) {
-    if (!origin) return callback(null, true);
-    if (origin === 'http://localhost:3000' || origin.endsWith('.vercel.app')) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
-  credentials: true
-}));
-
+app.use(cors());
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
-app.get('/', (req, res) => {
-  res.json({
-    status: 'Campus Notes API is running',
-    docs: 'Use /api/notes or /api/subjects'
-  });
-});
 
 // Cloudinary Config
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
-  timeout: 120000
+  api_secret: process.env.CLOUDINARY_API_SECRET
 });
 
-// Debug log to verify env vars loaded
-console.log('Cloudinary Config:', {
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY? 'SET' : 'MISSING',
-  api_secret: process.env.CLOUDINARY_API_SECRET? 'SET' : 'MISSING'
-});
-
-// Neon DB Connection - Safe SSL handling
-let connectionString = process.env.DATABASE_URL;
-if (connectionString && connectionString.includes('?sslmode=require&channel_binding=require')) {
-  connectionString = connectionString.replace('?sslmode=require&channel_binding=require', '');
-}
-
+// PostgreSQL Connection
 const pool = new Pool({
-  connectionString: connectionString,
-  ssl: {
-    rejectUnauthorized: false
-  }
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production'? { rejectUnauthorized: false } : false
 });
 
-// Test DB Connection
-pool.connect((err, client, release) => {
-  if (err) {
-    console.error('Database connection error:', err.stack);
-    process.exit(1);
-  }
-  console.log('Database connected at:', new Date().toISOString());
-  release();
-});
-
-// Multer - FIXED: 100MB limit for large academic PDFs
+// Multer setup for file uploads
 const storage = multer.memoryStorage();
 const upload = multer({
   storage: storage,
-  limits: { fileSize: 100 * 1024 * 1024 }, // 100MB - THIS IS THE FIX
-  fileFilter: (req, file, cb) => {
-    if (file.mimetype === 'application/pdf') {
-      cb(null, true);
-    } else {
-      cb(new Error('Only PDF files allowed'), false);
-    }
-  }
+  limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
 });
 
-// ==================== ROUTES ====================
+// Test DB connection
+pool.query('SELECT NOW()', (err, res) => {
+  if (err) {
+    console.error('Database connection error:', err);
+  } else {
+    console.log('Database connected at:', res.rows[0].now);
+  }
+});
 
 // 1. GET ALL SUBJECTS
 app.get('/api/subjects', async (req, res) => {
@@ -97,36 +52,17 @@ app.get('/api/subjects', async (req, res) => {
   }
 });
 
-// 2. GET APPROVED NOTES
+// 2. GET ALL APPROVED NOTES
 app.get('/api/notes', async (req, res) => {
   try {
-    const { subject_id, search } = req.query;
-    let query = `
-      SELECT n.id, n.title, n.description, n.file_url, n.created_at, n.file_size, n.upvotes,
-             s.name as subject_name, s.semester, u.name as uploader_name
+    const result = await pool.query(`
+      SELECT n.*, s.name as subject_name, s.semester, u.name as uploader_name
       FROM notes n
-      JOIN subjects s ON n.subject_id = s.id
-      JOIN users u ON n.user_id = u.id
+      LEFT JOIN subjects s ON n.subject_id = s.id
+      LEFT JOIN users u ON n.user_id = u.id
       WHERE n.status = 'approved'
-    `;
-    const params = [];
-    let paramCount = 1;
-
-    if (subject_id) {
-      query += ` AND n.subject_id = $${paramCount}`;
-      params.push(subject_id);
-      paramCount++;
-    }
-
-    if (search) {
-      query += ` AND (LOWER(n.title) LIKE LOWER($${paramCount}) OR LOWER(n.description) LIKE LOWER($${paramCount}))`;
-      params.push(`%${search}%`);
-      paramCount++;
-    }
-
-    query += ' ORDER BY n.created_at DESC';
-
-    const result = await pool.query(query, params);
+      ORDER BY n.upvotes DESC, n.created_at DESC
+    `);
     res.json(result.rows);
   } catch (err) {
     console.error(err);
@@ -134,59 +70,35 @@ app.get('/api/notes', async (req, res) => {
   }
 });
 
-// 3. UPLOAD NOTE - Supports both server upload AND direct upload fallback
+// 3. UPLOAD NOTE - Student uploads PDF
 app.post('/api/notes', upload.single('file'), async (req, res) => {
-  req.setTimeout(120000);
-  res.setTimeout(120000);
-
   try {
-    const { title, description, subject_id, uploader_name, uploader_email, file_url, file_size } = req.body;
-    let finalFileUrl = file_url;
-    let finalFileSize = file_size;
+    const { title, description, subject_id, uploader_name, uploader_email } = req.body;
 
-    // CASE 1: Direct upload - file_url already provided from frontend
-    if (file_url) {
-      console.log(`Direct upload mode: ${title} - ${(file_size / 1024 / 1024).toFixed(2)}MB`);
-      finalFileUrl = file_url;
-      finalFileSize = file_size;
-    }
-    // CASE 2: Server upload - file came through multer
-    else if (req.file) {
-      console.log(`Server upload mode: ${title} - ${(req.file.size / 1024 / 1024).toFixed(2)}MB`);
-      const cleanTitle = title.replace(/[^a-z0-9]/gi, '_').replace(/_{2,}/g, '_').substring(0, 40);
-
-      const cloudinaryRes = await new Promise((resolve, reject) => {
-        const uploadStream = cloudinary.uploader.upload_large_stream(
-          {
-            folder: 'campus-notes',
-            resource_type: 'raw',
-            public_id: `${Date.now()}_${cleanTitle}`,
-            type: 'upload',
-            access_mode: 'public',
-            chunk_size: 6000000
-          },
-          (error, result) => {
-            if (error) {
-              console.error('Cloudinary Stream Error:', error);
-              reject(error);
-            } else {
-              console.log('Cloudinary Success:', result.secure_url);
-              resolve(result);
-            }
-          }
-        );
-        uploadStream.end(req.file.buffer);
-      });
-
-      finalFileUrl = cloudinaryRes.secure_url;
-      finalFileSize = req.file.size;
-    } else {
-      return res.status(400).json({ error: 'No file or file_url provided' });
+    if (!req.file) {
+      return res.status(400).json({ error: 'No PDF file uploaded' });
     }
 
-    // Save to DB - same for both cases
+    // Upload to Cloudinary
+    const b64 = Buffer.from(req.file.buffer).toString('base64');
+    const dataURI = 'data:' + req.file.mimetype + ';base64,' + b64;
+
+    const cleanTitle = title.replace(/[^a-z0-9]/gi, '_').substring(0, 50);
+
+    const cloudinaryRes = await cloudinary.uploader.upload(dataURI, {
+      folder: 'campus-notes',
+      resource_type: 'raw',
+      type: 'upload', // Makes file PUBLIC
+      access_mode: 'public', // Allows browser access
+      use_filename: true,
+      filename_override: cleanTitle,
+      unique_filename: false
+    });
+
+    // Check if user exists, else create
     let userResult = await pool.query('SELECT id FROM users WHERE email = $1', [uploader_email]);
     let userId;
+
     if (userResult.rows.length === 0) {
       const newUser = await pool.query(
         'INSERT INTO users (name, email, role) VALUES ($1, $2, $3) RETURNING id',
@@ -197,28 +109,45 @@ app.post('/api/notes', upload.single('file'), async (req, res) => {
       userId = userResult.rows[0].id;
     }
 
+    // Insert note into DB
     await pool.query(
       `INSERT INTO notes (user_id, subject_id, title, description, file_url, file_size, status)
        VALUES ($1, $2, $3, $4, $5, $6, 'pending')`,
-      [userId, subject_id, title, description, finalFileUrl, finalFileSize]
+      [userId, subject_id, title, description, cloudinaryRes.secure_url, Math.round(req.file.size / 1024)]
     );
 
-    res.json({ success: true, message: 'Uploaded! Waiting for admin approval' });
+    res.json({
+      success: true,
+      message: 'Uploaded! Waiting for admin approval',
+      file_url: cloudinaryRes.secure_url
+    });
 
   } catch (err) {
-    console.error('Upload error:', err);
+    console.error(err);
     res.status(500).json({ error: 'Upload failed: ' + err.message });
   }
 });
 
-// 4. ADMIN - GET ALL NOTES
+// 4. UPVOTE NOTE
+app.post('/api/notes/:id/upvote', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query('UPDATE notes SET upvotes = upvotes + 1 WHERE id = $1', [id]);
+    res.json({ success: true, message: 'Upvoted!' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Upvote failed' });
+  }
+});
+
+// 5. ADMIN - GET ALL NOTES
 app.get('/api/admin/notes', async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT n.*, s.name as subject_name, s.semester, n.upvotes, u.name as uploader_name, u.email as uploader_email
+      SELECT n.*, s.name as subject_name, s.semester, u.name as uploader_name, u.email as uploader_email
       FROM notes n
-      JOIN subjects s ON n.subject_id = s.id
-      JOIN users u ON n.user_id = u.id
+      LEFT JOIN subjects s ON n.subject_id = s.id
+      LEFT JOIN users u ON n.user_id = u.id
       ORDER BY n.created_at DESC
     `);
     res.json(result.rows);
@@ -228,10 +157,11 @@ app.get('/api/admin/notes', async (req, res) => {
   }
 });
 
-// 5. ADMIN - APPROVE NOTE
+// 6. ADMIN - APPROVE NOTE
 app.put('/api/admin/notes/:id/approve', async (req, res) => {
   try {
-    await pool.query("UPDATE notes SET status = 'approved' WHERE id = $1", [req.params.id]);
+    const { id } = req.params;
+    await pool.query('UPDATE notes SET status = $1 WHERE id = $2', ['approved', id]);
     res.json({ success: true, message: 'Note approved' });
   } catch (err) {
     console.error(err);
@@ -239,10 +169,11 @@ app.put('/api/admin/notes/:id/approve', async (req, res) => {
   }
 });
 
-// 6. ADMIN - REJECT NOTE
+// 7. ADMIN - REJECT NOTE
 app.put('/api/admin/notes/:id/reject', async (req, res) => {
   try {
-    await pool.query("UPDATE notes SET status = 'rejected' WHERE id = $1", [req.params.id]);
+    const { id } = req.params;
+    await pool.query('UPDATE notes SET status = $1 WHERE id = $2', ['rejected', id]);
     res.json({ success: true, message: 'Note rejected' });
   } catch (err) {
     console.error(err);
@@ -250,10 +181,11 @@ app.put('/api/admin/notes/:id/reject', async (req, res) => {
   }
 });
 
-// 7. ADMIN - DELETE NOTE
+// 8. ADMIN - DELETE NOTE
 app.delete('/api/admin/notes/:id', async (req, res) => {
   try {
-    await pool.query('DELETE FROM notes WHERE id = $1', [req.params.id]);
+    const { id } = req.params;
+    await pool.query('DELETE FROM notes WHERE id = $1', [id]);
     res.json({ success: true, message: 'Note deleted' });
   } catch (err) {
     console.error(err);
@@ -261,105 +193,7 @@ app.delete('/api/admin/notes/:id', async (req, res) => {
   }
 });
 
-// 8. ADD SUBJECT
-app.post('/api/admin/subjects', async (req, res) => {
-  try {
-    const { name, semester } = req.body;
-    await pool.query('INSERT INTO subjects (name, semester) VALUES ($1, $2)', [name, semester]);
-    res.json({ success: true, message: 'Subject added' });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to add subject' });
-  }
-});
-
-// 9. DELETE SUBJECT
-app.delete('/api/admin/subjects/:id', async (req, res) => {
-  try {
-    await pool.query('DELETE FROM subjects WHERE id = $1', [req.params.id]);
-    res.json({ success: true, message: 'Subject deleted' });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Delete failed. Subject may have notes.' });
-  }
-});
-
-// 10. DOWNLOAD ROUTE
-app.get('/api/download/:id', async (req, res) => {
-  try {
-    const result = await pool.query('SELECT title, file_url FROM notes WHERE id = $1', [req.params.id]);
-    if (result.rows.length === 0) return res.status(404).send('Note not found');
-
-    const { title, file_url } = result.rows[0];
-    const cleanTitle = title.replace(/[^a-z0-9]/gi, '_').substring(0, 50) + '.pdf';
-
-    https.get(file_url, (cloudinaryRes) => {
-      res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `attachment; filename="${cleanTitle}"`);
-      cloudinaryRes.pipe(res);
-    }).on('error', () => {
-      res.status(500).send('Download failed');
-    });
-
-  } catch (err) {
-    console.error(err);
-    res.status(500).send('Download failed');
-  }
-});
-
-// 11. UPVOTE NOTE
-app.put('/api/notes/:id/upvote', async (req, res) => {
-  try {
-    const { id } = req.params;
-    await pool.query(
-      'UPDATE notes SET upvotes = COALESCE(upvotes, 0) + 1 WHERE id = $1',
-      [id]
-    );
-    const result = await pool.query('SELECT upvotes FROM notes WHERE id = $1', [id]);
-    res.json({ success: true, upvotes: result.rows[0].upvotes });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Upvote failed' });
-  }
-});
-
-// 12. GET CLOUDINARY SIGNATURE FOR DIRECT UPLOAD FALLBACK
-app.post('/api/get-upload-signature', (req, res) => {
-  const timestamp = Math.round(new Date().getTime() / 1000);
-  const cleanTitle = req.body.title.replace(/[^a-z0-9]/gi, '_').substring(0, 40);
-
-  const params_to_sign = {
-    timestamp: timestamp,
-    folder: 'campus-notes',
-    resource_type: 'raw',
-    public_id: `${timestamp}_${cleanTitle}`
-  };
-
-  const signature = cloudinary.utils.api_sign_request(params_to_sign, process.env.CLOUDINARY_API_SECRET);
-
-  res.json({
-    signature,
-    timestamp,
-    cloudname: process.env.CLOUDINARY_CLOUD_NAME,
-    apikey: process.env.CLOUDINARY_API_KEY,
-    folder: 'campus-notes',
-    public_id: params_to_sign.public_id
-  });
-});
-
-// Error handling middleware for Multer
-app.use((error, req, res, next) => {
-  if (error instanceof multer.MulterError) {
-    if (error.code === 'LIMIT_FILE_SIZE') {
-      return res.status(400).json({ error: 'File too large. Maximum size is 100MB.' });
-    }
-  }
-  res.status(500).json({ error: error.message });
-});
-
-// Start Server
+// Start server
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  console.log(`CORS enabled for: localhost:3000 and *.vercel.app`);
-  console.log(`Max upload size: 100MB`);
 });
