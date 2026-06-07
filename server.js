@@ -68,7 +68,7 @@ pool.connect((err, client, release) => {
 const storage = multer.memoryStorage();
 const upload = multer({
   storage: storage,
-  limits: { fileSize: 100 * 1024 }, // 100MB limit
+  limits: { fileSize: 100 * 1024 * 1024 }, // 100MB limit - FIXED
   fileFilter: (req, file, cb) => {
     if (file.mimetype === 'application/pdf') {
       cb(null, true);
