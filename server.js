@@ -39,14 +39,15 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
   timeout: 120000
 });
-// ADD THESE 2 LINES FOR DEBUG
+
+// Debug log to verify env vars loaded
 console.log('Cloudinary Config:', {
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY ? 'SET' : 'MISSING',
-  api_secret: process.env.CLOUDINARY_API_SECRET ? 'SET' : 'MISSING'
+  api_key: process.env.CLOUDINARY_API_KEY? 'SET' : 'MISSING',
+  api_secret: process.env.CLOUDINARY_API_SECRET? 'SET' : 'MISSING'
 });
 
-// Neon DB Connection - FIXED: Safe replace
+// Neon DB Connection - Safe SSL handling
 let connectionString = process.env.DATABASE_URL;
 if (connectionString && connectionString.includes('?sslmode=require&channel_binding=require')) {
   connectionString = connectionString.replace('?sslmode=require&channel_binding=require', '');
@@ -63,17 +64,17 @@ const pool = new Pool({
 pool.connect((err, client, release) => {
   if (err) {
     console.error('Database connection error:', err.stack);
-    process.exit(1); // Crash clearly if DB fails
+    process.exit(1);
   }
   console.log('Database connected at:', new Date().toISOString());
   release();
 });
 
-// Multer - FIXED: 100MB limit
+// Multer - FIXED: 100MB limit for large academic PDFs
 const storage = multer.memoryStorage();
 const upload = multer({
   storage: storage,
-  limits: { fileSize: 100 * 1024 * 1024 }, // 100MB
+  limits: { fileSize: 100 * 1024 }, // 100MB
   fileFilter: (req, file, cb) => {
     if (file.mimetype === 'application/pdf') {
       cb(null, true);
@@ -133,7 +134,7 @@ app.get('/api/notes', async (req, res) => {
   }
 });
 
-// 3. UPLOAD NOTE - FIXED: Timeout + 100MB
+// 3. UPLOAD NOTE - FIXED: Uses upload_large_stream for 100MB support
 app.post('/api/notes', upload.single('file'), async (req, res) => {
   req.setTimeout(120000);
   res.setTimeout(120000);
@@ -145,18 +146,19 @@ app.post('/api/notes', upload.single('file'), async (req, res) => {
       return res.status(400).json({ error: 'No PDF file uploaded' });
     }
 
-    console.log(`Upload started: ${title} - ${(req.file.size / 1024).toFixed(2)}MB`);
+    console.log(`Upload started: ${title} - ${(req.file.size / 1024 / 1024).toFixed(2)}MB`);
 
     const cleanTitle = title.replace(/[^a-z0-9]/gi, '_').replace(/_{2,}/g, '_').substring(0, 40);
 
     const cloudinaryRes = await new Promise((resolve, reject) => {
-      const uploadStream = cloudinary.uploader.upload_stream(
+      const uploadStream = cloudinary.uploader.upload_large_stream(
         {
           folder: 'campus-notes',
           resource_type: 'raw',
           public_id: `${Date.now()}_${cleanTitle}`,
           type: 'upload',
-          access_mode: 'public'
+          access_mode: 'public',
+          chunk_size: 6000000 // 6MB chunks required for files > 10MB
         },
         (error, result) => {
           if (error) {
