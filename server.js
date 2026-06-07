@@ -134,45 +134,57 @@ app.get('/api/notes', async (req, res) => {
   }
 });
 
-// 3. UPLOAD NOTE - FIXED: Uses upload_large_stream for 100MB support
+// 3. UPLOAD NOTE - Supports both server upload AND direct upload fallback
 app.post('/api/notes', upload.single('file'), async (req, res) => {
   req.setTimeout(120000);
   res.setTimeout(120000);
 
   try {
-    const { title, description, subject_id, uploader_name, uploader_email } = req.body;
+    const { title, description, subject_id, uploader_name, uploader_email, file_url, file_size } = req.body;
+    let finalFileUrl = file_url;
+    let finalFileSize = file_size;
 
-    if (!req.file) {
-      return res.status(400).json({ error: 'No PDF file uploaded' });
+    // CASE 1: Direct upload - file_url already provided from frontend
+    if (file_url) {
+      console.log(`Direct upload mode: ${title} - ${(file_size / 1024 / 1024).toFixed(2)}MB`);
+      finalFileUrl = file_url;
+      finalFileSize = file_size;
+    }
+    // CASE 2: Server upload - file came through multer
+    else if (req.file) {
+      console.log(`Server upload mode: ${title} - ${(req.file.size / 1024 / 1024).toFixed(2)}MB`);
+      const cleanTitle = title.replace(/[^a-z0-9]/gi, '_').replace(/_{2,}/g, '_').substring(0, 40);
+
+      const cloudinaryRes = await new Promise((resolve, reject) => {
+        const uploadStream = cloudinary.uploader.upload_large_stream(
+          {
+            folder: 'campus-notes',
+            resource_type: 'raw',
+            public_id: `${Date.now()}_${cleanTitle}`,
+            type: 'upload',
+            access_mode: 'public',
+            chunk_size: 6000000
+          },
+          (error, result) => {
+            if (error) {
+              console.error('Cloudinary Stream Error:', error);
+              reject(error);
+            } else {
+              console.log('Cloudinary Success:', result.secure_url);
+              resolve(result);
+            }
+          }
+        );
+        uploadStream.end(req.file.buffer);
+      });
+
+      finalFileUrl = cloudinaryRes.secure_url;
+      finalFileSize = req.file.size;
+    } else {
+      return res.status(400).json({ error: 'No file or file_url provided' });
     }
 
-    console.log(`Upload started: ${title} - ${(req.file.size / 1024 / 1024).toFixed(2)}MB`);
-
-    const cleanTitle = title.replace(/[^a-z0-9]/gi, '_').replace(/_{2,}/g, '_').substring(0, 40);
-
-    const cloudinaryRes = await new Promise((resolve, reject) => {
-      const uploadStream = cloudinary.uploader.upload_large_stream(
-        {
-          folder: 'campus-notes',
-          resource_type: 'raw',
-          public_id: `${Date.now()}_${cleanTitle}`,
-          type: 'upload',
-          access_mode: 'public',
-          chunk_size: 6000000 // 6MB chunks required for files > 10MB
-        },
-        (error, result) => {
-          if (error) {
-            console.error('Cloudinary Stream Error:', error);
-            reject(error);
-          } else {
-            console.log('Cloudinary Success:', result.secure_url);
-            resolve(result);
-          }
-        }
-      );
-      uploadStream.end(req.file.buffer);
-    });
-
+    // Save to DB - same for both cases
     let userResult = await pool.query('SELECT id FROM users WHERE email = $1', [uploader_email]);
     let userId;
     if (userResult.rows.length === 0) {
@@ -188,7 +200,7 @@ app.post('/api/notes', upload.single('file'), async (req, res) => {
     await pool.query(
       `INSERT INTO notes (user_id, subject_id, title, description, file_url, file_size, status)
        VALUES ($1, $2, $3, $4, $5, $6, 'pending')`,
-      [userId, subject_id, title, description, cloudinaryRes.secure_url, req.file.size]
+      [userId, subject_id, title, description, finalFileUrl, finalFileSize]
     );
 
     res.json({ success: true, message: 'Uploaded! Waiting for admin approval' });
@@ -309,6 +321,30 @@ app.put('/api/notes/:id/upvote', async (req, res) => {
     console.error(err);
     res.status(500).json({ error: 'Upvote failed' });
   }
+});
+
+// 12. GET CLOUDINARY SIGNATURE FOR DIRECT UPLOAD FALLBACK
+app.post('/api/get-upload-signature', (req, res) => {
+  const timestamp = Math.round(new Date().getTime() / 1000);
+  const cleanTitle = req.body.title.replace(/[^a-z0-9]/gi, '_').substring(0, 40);
+
+  const params_to_sign = {
+    timestamp: timestamp,
+    folder: 'campus-notes',
+    resource_type: 'raw',
+    public_id: `${timestamp}_${cleanTitle}`
+  };
+
+  const signature = cloudinary.utils.api_sign_request(params_to_sign, process.env.CLOUDINARY_API_SECRET);
+
+  res.json({
+    signature,
+    timestamp,
+    cloudname: process.env.CLOUDINARY_CLOUD_NAME,
+    apikey: process.env.CLOUDINARY_API_KEY,
+    folder: 'campus-notes',
+    public_id: params_to_sign.public_id
+  });
 });
 
 // Error handling middleware for Multer
