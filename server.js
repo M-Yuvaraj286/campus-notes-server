@@ -12,10 +12,7 @@ const PORT = process.env.PORT || 4000;
 // Middleware
 app.use(cors({
   origin: function (origin, callback) {
-    // Allow requests with no origin - Postman, mobile apps, curl
     if (!origin) return callback(null, true);
-
-    // Allow localhost and any *.vercel.app domain
     if (origin === 'http://localhost:3000' || origin.endsWith('.vercel.app')) {
       callback(null, true);
     } else {
@@ -25,8 +22,6 @@ app.use(cors({
   credentials: true
 }));
 
-// Removed express.json 50mb limit - not needed for multipart uploads
-// Multer handles file uploads, not JSON parser
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -42,12 +37,17 @@ cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET,
-  timeout: 120000 // 2 min timeout for large uploads
+  timeout: 120000
 });
 
-// Neon DB Connection - Fix SSL warning by removing sslmode from URL
+// Neon DB Connection - FIXED: Safe replace
+let connectionString = process.env.DATABASE_URL;
+if (connectionString && connectionString.includes('?sslmode=require&channel_binding=require')) {
+  connectionString = connectionString.replace('?sslmode=require&channel_binding=require', '');
+}
+
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL.replace('?sslmode=require&channel_binding=require', ''),
+  connectionString: connectionString,
   ssl: {
     rejectUnauthorized: false
   }
@@ -57,18 +57,17 @@ const pool = new Pool({
 pool.connect((err, client, release) => {
   if (err) {
     console.error('Database connection error:', err.stack);
-    return;
+    process.exit(1); // Crash clearly if DB fails
   }
   console.log('Database connected at:', new Date().toISOString());
   release();
 });
 
-// Multer - store file in memory for streaming to Cloudinary
-// FIXED: Increased to 100MB to support large academic PDFs
+// Multer - FIXED: 100MB limit
 const storage = multer.memoryStorage();
 const upload = multer({
   storage: storage,
-  limits: { fileSize: 100 * 1024 * 1024 }, // 100MB limit - FIXED
+  limits: { fileSize: 100 * 1024 * 1024 }, // 100MB
   fileFilter: (req, file, cb) => {
     if (file.mimetype === 'application/pdf') {
       cb(null, true);
@@ -91,7 +90,7 @@ app.get('/api/subjects', async (req, res) => {
   }
 });
 
-// 2. GET APPROVED NOTES - for Home page
+// 2. GET APPROVED NOTES
 app.get('/api/notes', async (req, res) => {
   try {
     const { subject_id, search } = req.query;
@@ -128,11 +127,9 @@ app.get('/api/notes', async (req, res) => {
   }
 });
 
-// 3. UPLOAD NOTE - Student uploads PDF
-// FIXED: Added timeout handling for Render + 100MB support
+// 3. UPLOAD NOTE - FIXED: Timeout + 100MB
 app.post('/api/notes', upload.single('file'), async (req, res) => {
-  // CRITICAL: Increase timeout for large files - Render kills requests at 30s by default
-  req.setTimeout(120000); // 2 minutes
+  req.setTimeout(120000);
   res.setTimeout(120000);
 
   try {
@@ -142,17 +139,15 @@ app.post('/api/notes', upload.single('file'), async (req, res) => {
       return res.status(400).json({ error: 'No PDF file uploaded' });
     }
 
-    console.log(`Upload started: ${title} - ${(req.file.size / 1024 / 1024).toFixed(2)}MB`);
+    console.log(`Upload started: ${title} - ${(req.file.size / 1024).toFixed(2)}MB`);
 
     const cleanTitle = title.replace(/[^a-z0-9]/gi, '_').replace(/_{2,}/g, '_').substring(0, 40);
 
-    // Use upload_stream instead of dataURI to avoid 10MB limit
-    // This hits Cloudinary /raw/upload endpoint with 100MB limit
     const cloudinaryRes = await new Promise((resolve, reject) => {
       const uploadStream = cloudinary.uploader.upload_stream(
         {
           folder: 'campus-notes',
-          resource_type: 'raw', // Critical for PDFs - must be 'raw' not 'auto' or 'image'
+          resource_type: 'raw',
           public_id: `${Date.now()}_${cleanTitle}`,
           type: 'upload',
           access_mode: 'public'
@@ -185,7 +180,7 @@ app.post('/api/notes', upload.single('file'), async (req, res) => {
     await pool.query(
       `INSERT INTO notes (user_id, subject_id, title, description, file_url, file_size, status)
        VALUES ($1, $2, $3, $4, $5, $6, 'pending')`,
-      [userId, subject_id, title, description, cloudinaryRes.secure_url, req.file.size] // Store bytes
+      [userId, subject_id, title, description, cloudinaryRes.secure_url, req.file.size]
     );
 
     res.json({ success: true, message: 'Uploaded! Waiting for admin approval' });
@@ -269,7 +264,7 @@ app.delete('/api/admin/subjects/:id', async (req, res) => {
   }
 });
 
-// 10. DOWNLOAD ROUTE - Force.pdf filename
+// 10. DOWNLOAD ROUTE
 app.get('/api/download/:id', async (req, res) => {
   try {
     const result = await pool.query('SELECT title, file_url FROM notes WHERE id = $1', [req.params.id]);
