@@ -39,6 +39,12 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
   timeout: 120000
 });
+// ADD THESE 2 LINES FOR DEBUG
+console.log('Cloudinary Config:', {
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY ? 'SET' : 'MISSING',
+  api_secret: process.env.CLOUDINARY_API_SECRET ? 'SET' : 'MISSING'
+});
 
 // Neon DB Connection - FIXED: Safe replace
 let connectionString = process.env.DATABASE_URL;
