@@ -14,7 +14,7 @@ app.use(cors({
   origin: function (origin, callback) {
     // Allow requests with no origin - Postman, mobile apps, curl
     if (!origin) return callback(null, true);
-    
+
     // Allow localhost and any *.vercel.app domain
     if (origin === 'http://localhost:3000' || origin.endsWith('.vercel.app')) {
       callback(null, true);
@@ -25,12 +25,15 @@ app.use(cors({
   credentials: true
 }));
 
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
+// Removed express.json 50mb limit - not needed for multipart uploads
+// Multer handles file uploads, not JSON parser
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
 app.get('/', (req, res) => {
-  res.json({ 
+  res.json({
     status: 'Campus Notes API is running',
-    docs: 'Use /api/notes or /api/subjects' 
+    docs: 'Use /api/notes or /api/subjects'
   });
 });
 
@@ -38,7 +41,8 @@ app.get('/', (req, res) => {
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+  timeout: 120000 // 2 min timeout for large uploads
 });
 
 // Neon DB Connection - Fix SSL warning by removing sslmode from URL
@@ -59,11 +63,12 @@ pool.connect((err, client, release) => {
   release();
 });
 
-// Multer - store file in memory
+// Multer - store file in memory for streaming to Cloudinary
+// FIXED: Increased to 100MB to support large academic PDFs
 const storage = multer.memoryStorage();
 const upload = multer({
   storage: storage,
-  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB limit
+  limits: { fileSize: 100 * 1024 }, // 100MB limit
   fileFilter: (req, file, cb) => {
     if (file.mimetype === 'application/pdf') {
       cb(null, true);
@@ -124,7 +129,12 @@ app.get('/api/notes', async (req, res) => {
 });
 
 // 3. UPLOAD NOTE - Student uploads PDF
+// FIXED: Added timeout handling for Render + 100MB support
 app.post('/api/notes', upload.single('file'), async (req, res) => {
+  // CRITICAL: Increase timeout for large files - Render kills requests at 30s by default
+  req.setTimeout(120000); // 2 minutes
+  res.setTimeout(120000);
+
   try {
     const { title, description, subject_id, uploader_name, uploader_email } = req.body;
 
@@ -132,21 +142,29 @@ app.post('/api/notes', upload.single('file'), async (req, res) => {
       return res.status(400).json({ error: 'No PDF file uploaded' });
     }
 
+    console.log(`Upload started: ${title} - ${(req.file.size / 1024 / 1024).toFixed(2)}MB`);
+
     const cleanTitle = title.replace(/[^a-z0-9]/gi, '_').replace(/_{2,}/g, '_').substring(0, 40);
 
     // Use upload_stream instead of dataURI to avoid 10MB limit
+    // This hits Cloudinary /raw/upload endpoint with 100MB limit
     const cloudinaryRes = await new Promise((resolve, reject) => {
       const uploadStream = cloudinary.uploader.upload_stream(
         {
           folder: 'campus-notes',
-          resource_type: 'raw', // Critical for PDFs
+          resource_type: 'raw', // Critical for PDFs - must be 'raw' not 'auto' or 'image'
           public_id: `${Date.now()}_${cleanTitle}`,
           type: 'upload',
           access_mode: 'public'
         },
         (error, result) => {
-          if (error) reject(error);
-          else resolve(result);
+          if (error) {
+            console.error('Cloudinary Stream Error:', error);
+            reject(error);
+          } else {
+            console.log('Cloudinary Success:', result.secure_url);
+            resolve(result);
+          }
         }
       );
       uploadStream.end(req.file.buffer);
@@ -167,7 +185,7 @@ app.post('/api/notes', upload.single('file'), async (req, res) => {
     await pool.query(
       `INSERT INTO notes (user_id, subject_id, title, description, file_url, file_size, status)
        VALUES ($1, $2, $3, $4, $5, $6, 'pending')`,
-      [userId, subject_id, title, description, cloudinaryRes.secure_url, Math.round(req.file.size / 1024)]
+      [userId, subject_id, title, description, cloudinaryRes.secure_url, req.file.size] // Store bytes
     );
 
     res.json({ success: true, message: 'Uploaded! Waiting for admin approval' });
@@ -279,7 +297,7 @@ app.put('/api/notes/:id/upvote', async (req, res) => {
   try {
     const { id } = req.params;
     await pool.query(
-      'UPDATE notes SET upvotes = COALESCE(upvotes, 0) + 1 WHERE id = $1', 
+      'UPDATE notes SET upvotes = COALESCE(upvotes, 0) + 1 WHERE id = $1',
       [id]
     );
     const result = await pool.query('SELECT upvotes FROM notes WHERE id = $1', [id]);
@@ -290,7 +308,19 @@ app.put('/api/notes/:id/upvote', async (req, res) => {
   }
 });
 
+// Error handling middleware for Multer
+app.use((error, req, res, next) => {
+  if (error instanceof multer.MulterError) {
+    if (error.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({ error: 'File too large. Maximum size is 100MB.' });
+    }
+  }
+  res.status(500).json({ error: error.message });
+});
+
 // Start Server
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  console.log(`CORS enabled for: localhost:3000 and *.vercel.app`);
+  console.log(`Max upload size: 100MB`);
 });
